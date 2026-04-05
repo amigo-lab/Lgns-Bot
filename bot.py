@@ -6,7 +6,6 @@ from datetime import datetime, timezone, timedelta
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 
-# LGNS/DAI 대표 풀
 CHAIN_ID = "polygon"
 PAIR_ADDRESS = "0x882df4b0fb50a229c3b4124eb18c759911485bfb"
 
@@ -121,9 +120,11 @@ def calc_sell_ratio(buys_24h, sells_24h):
 
 
 def score_sell_ratio(sell_ratio):
-    if sell_ratio > 0.65:
+    if sell_ratio >= 0.80:
+        return 3, "매도 비율 매우 높음"
+    elif sell_ratio >= 0.70:
         return 2, "매도 비중 높음"
-    elif sell_ratio > 0.55:
+    elif sell_ratio >= 0.55:
         return 1, "매도 우세"
     else:
         return 0, "매수/매도 균형 무난"
@@ -144,19 +145,19 @@ def score_liquidity_trend(curr_liq, history):
     reasons = []
 
     if liq_change_prev is not None:
-        if liq_change_prev <= -3:
+        if liq_change_prev <= -5:
             score += 2
-            reasons.append("직전 대비 유동성 감소 강함")
-        elif liq_change_prev <= -1:
+            reasons.append("직전 대비 유동성 급감")
+        elif liq_change_prev <= -2:
             score += 1
-            reasons.append("직전 대비 유동성 소폭 감소")
+            reasons.append("직전 대비 유동성 감소")
         else:
             reasons.append("직전 대비 유동성 안정")
 
     if liq_change_avg is not None:
         if liq_change_avg <= -5:
             score += 2
-            reasons.append("3회 평균 대비 유동성 하락")
+            reasons.append("3회 평균 대비 유동성 급감")
         elif liq_change_avg <= -2:
             score += 1
             reasons.append("3회 평균 대비 유동성 약화")
@@ -182,19 +183,19 @@ def score_volume_trend(curr_vol, history):
     reasons = []
 
     if vol_change_prev is not None:
-        if vol_change_prev <= -30:
+        if vol_change_prev <= -35:
             score += 2
-            reasons.append("직전 대비 거래량 감소 강함")
-        elif vol_change_prev <= -10:
+            reasons.append("직전 대비 거래량 급감")
+        elif vol_change_prev <= -15:
             score += 1
-            reasons.append("직전 대비 거래량 소폭 감소")
+            reasons.append("직전 대비 거래량 감소")
         else:
             reasons.append("직전 대비 거래량 안정")
 
     if vol_change_avg is not None:
         if vol_change_avg <= -35:
             score += 2
-            reasons.append("3회 평균 대비 거래량 하락")
+            reasons.append("3회 평균 대비 거래량 급감")
         elif vol_change_avg <= -15:
             score += 1
             reasons.append("3회 평균 대비 거래량 약화")
@@ -215,7 +216,6 @@ def score_sell_ratio_trend(curr_sell_ratio, history):
     if prev1 is None or prev2 is None:
         return 0, "매도 비율 연속 추세 데이터 부족"
 
-    # 2회 연속 악화 여부
     if curr_sell_ratio > prev1 > prev2:
         return 2, "매도 비율 2회 연속 악화"
     elif curr_sell_ratio > prev1:
@@ -231,6 +231,26 @@ def classify(total_score):
         return "🟡 주의", "부분 출금 또는 원금 회수 검토"
     else:
         return "🔴 위험", "신규 진입 보수적 접근, 출금 우선 검토"
+
+
+def get_alert_message(price_change_24h, liq_change_ref, sell_ratio):
+    if liq_change_ref is None:
+        liq_change_ref = 0
+
+    if price_change_24h <= -20 and liq_change_ref <= -5 and sell_ratio >= 0.80:
+        return "🚨🚨🚨 탈출 신호: 가격 급락 + 유동성 급감 + 매도 폭증", 4, "가격 -20% 이하 + 유동성 -5% 이하 + 매도비율 80% 이상"
+    elif price_change_24h <= -15 and liq_change_ref <= -3 and sell_ratio >= 0.75:
+        return "🔥 긴급 경고: 가격 급락 + 유동성 감소 + 매도 심화", 3, "가격 -15% 이하 + 유동성 -3% 이하 + 매도비율 75% 이상"
+    elif price_change_24h <= -10 and liq_change_ref <= -2 and sell_ratio >= 0.70:
+        return "⚠️ 경고: 가격 하락 + 유동성 약화 + 매도 증가", 2, "가격 -10% 이하 + 유동성 -2% 이하 + 매도비율 70% 이상"
+    elif price_change_24h <= -20:
+        return "🚨 가격 단독 탈출 신호: -20% 급락", 3, "가격 -20% 이하 단독 급락"
+    elif price_change_24h <= -15:
+        return "🔥 가격 긴급 경고: -15% 급락", 2, "가격 -15% 이하 단독 급락"
+    elif price_change_24h <= -10:
+        return "⚠️ 가격 경고: -10% 급락", 1, "가격 -10% 이하 단독 급락"
+
+    return "", 0, ""
 
 
 def build_report(pair, history):
@@ -257,13 +277,16 @@ def build_report(pair, history):
     s6, r6, vol_change_prev, vol_change_avg = score_volume_trend(volume_24h, history)
     s7, r7 = score_sell_ratio_trend(sell_ratio, history)
 
-    total_score = s1 + s2 + s3 + s4 + s5 + s6 + s7
+    liq_change_ref = liq_change_avg if liq_change_avg is not None else liq_change_prev
+    alert_msg, extra_score, extra_reason = get_alert_message(price_change_24h, liq_change_ref, sell_ratio)
+
+    total_score = s1 + s2 + s3 + s4 + s5 + s6 + s7 + extra_score
     status, action = classify(total_score)
 
     now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
 
     report_lines = [
-        "📊 LGNS 3회 평균 안정형 리포트",
+        "📊 LGNS 복합위험 감지 리포트",
         f"⏰ KST: {now_kst}",
         "",
         f"체인: {chain_id}",
@@ -294,11 +317,18 @@ def build_report(pair, history):
         f"- {r7} ({s7}점)",
     ]
 
+    if extra_reason:
+        report_lines.append(f"- 복합 경고: {extra_reason} ({extra_score}점)")
+
+    if alert_msg:
+        report_lines.insert(0, "")
+        report_lines.insert(0, alert_msg)
+
     new_entry = {
         "timestamp": now_kst,
         "liquidity_usd": liquidity_usd,
         "volume_24h": volume_24h,
-        "sell_ratio": sell_ratio,
+        "sell_ratio": sell_ratio
     }
 
     return "\n".join(report_lines), new_entry
@@ -323,7 +353,7 @@ def main():
         report, new_entry = build_report(pair, history)
 
         history.append(new_entry)
-        history = history[-20:]  # 최근 20개만 유지
+        history = history[-20:]
         save_history(history)
 
     except Exception as e:
