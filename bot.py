@@ -6,12 +6,12 @@ from datetime import datetime, timezone, timedelta
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 
-# Polygon / Quickswap / LGNS-DAI 대표 풀
+# LGNS/DAI 대표 풀
 CHAIN_ID = "polygon"
 PAIR_ADDRESS = "0x882df4b0fb50a229c3b4124eb18c759911485bfb"
 
 PAIR_URL = f"https://api.dexscreener.com/latest/dex/pairs/{CHAIN_ID}/{PAIR_ADDRESS}"
-STATE_FILE = "state.json"
+HISTORY_FILE = "history.json"
 
 KST = timezone(timedelta(hours=9))
 
@@ -31,19 +31,29 @@ def pct_change(current, previous):
     return ((current - previous) / previous) * 100.0
 
 
-def load_previous_state():
-    if not os.path.exists(STATE_FILE):
+def avg(values):
+    nums = [v for v in values if isinstance(v, (int, float))]
+    if not nums:
         return None
+    return sum(nums) / len(nums)
+
+
+def load_history():
+    if not os.path.exists(HISTORY_FILE):
+        return []
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, list):
+                return data
+            return []
     except Exception:
-        return None
+        return []
 
 
-def save_state(state):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=2)
+def save_history(history):
+    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(history, f, ensure_ascii=False, indent=2)
 
 
 def fetch_pair():
@@ -53,7 +63,7 @@ def fetch_pair():
 
     pairs = data.get("pairs") or []
     if not pairs:
-        raise RuntimeError("DexScreener에서 페어 데이터를 찾지 못했습니다.")
+        raise RuntimeError("DexScreener에서 LGNS 페어 데이터를 찾지 못했습니다.")
 
     return pairs[0]
 
@@ -75,7 +85,7 @@ def format_pct(value):
     return f"{sign}{value:.2f}%"
 
 
-def score_liquidity(liquidity_usd):
+def score_liquidity_size(liquidity_usd):
     if liquidity_usd >= 300_000_000:
         return 0, "유동성 매우 큼"
     elif liquidity_usd >= 100_000_000:
@@ -84,35 +94,13 @@ def score_liquidity(liquidity_usd):
         return 2, "유동성 낮음"
 
 
-def score_liquidity_change(liq_change_pct):
-    if liq_change_pct is None:
-        return 0, "유동성 변화 비교 데이터 없음"
-    if liq_change_pct <= -3:
-        return 2, "유동성 감소 강함"
-    elif liq_change_pct <= -1:
-        return 1, "유동성 소폭 감소"
-    else:
-        return 0, "유동성 변화 안정"
-
-
-def score_volume(volume_24h):
+def score_volume_size(volume_24h):
     if volume_24h >= 20_000_000:
         return 0, "24시간 거래량 높음"
     elif volume_24h >= 5_000_000:
         return 1, "24시간 거래량 보통"
     else:
         return 2, "24시간 거래량 약함"
-
-
-def score_volume_change(vol_change_pct):
-    if vol_change_pct is None:
-        return 0, "거래량 변화 비교 데이터 없음"
-    if vol_change_pct <= -30:
-        return 2, "거래량 감소 강함"
-    elif vol_change_pct <= -10:
-        return 1, "거래량 소폭 감소"
-    else:
-        return 0, "거래량 변화 안정"
 
 
 def score_price_change(price_change_24h):
@@ -125,34 +113,132 @@ def score_price_change(price_change_24h):
         return 2, "가격 변동 큼"
 
 
-def score_sell_ratio(buys_24h, sells_24h):
+def calc_sell_ratio(buys_24h, sells_24h):
     total = buys_24h + sells_24h
     if total == 0:
-        return 2, 0.0, "거래 건수 부족"
+        return 0.0
+    return sells_24h / total
 
-    sell_ratio = sells_24h / total
+
+def score_sell_ratio(sell_ratio):
     if sell_ratio > 0.65:
-        return 2, sell_ratio, "매도 비중 높음"
+        return 2, "매도 비중 높음"
     elif sell_ratio > 0.55:
-        return 1, sell_ratio, "매도 우세"
+        return 1, "매도 우세"
     else:
-        return 0, sell_ratio, "매수/매도 균형 무난"
+        return 0, "매수/매도 균형 무난"
+
+
+def score_liquidity_trend(curr_liq, history):
+    if not history:
+        return 0, "유동성 추세 데이터 부족", None, None
+
+    prev_liq = history[-1].get("liquidity_usd")
+    liq_change_prev = pct_change(curr_liq, prev_liq)
+
+    recent_liqs = [h.get("liquidity_usd") for h in history[-3:] if h.get("liquidity_usd") is not None]
+    liq_avg_3 = avg(recent_liqs)
+    liq_change_avg = pct_change(curr_liq, liq_avg_3)
+
+    score = 0
+    reasons = []
+
+    if liq_change_prev is not None:
+        if liq_change_prev <= -3:
+            score += 2
+            reasons.append("직전 대비 유동성 감소 강함")
+        elif liq_change_prev <= -1:
+            score += 1
+            reasons.append("직전 대비 유동성 소폭 감소")
+        else:
+            reasons.append("직전 대비 유동성 안정")
+
+    if liq_change_avg is not None:
+        if liq_change_avg <= -5:
+            score += 2
+            reasons.append("3회 평균 대비 유동성 하락")
+        elif liq_change_avg <= -2:
+            score += 1
+            reasons.append("3회 평균 대비 유동성 약화")
+        else:
+            reasons.append("3회 평균 대비 유동성 안정")
+
+    score = min(score, 3)
+    return score, " / ".join(reasons), liq_change_prev, liq_change_avg
+
+
+def score_volume_trend(curr_vol, history):
+    if not history:
+        return 0, "거래량 추세 데이터 부족", None, None
+
+    prev_vol = history[-1].get("volume_24h")
+    vol_change_prev = pct_change(curr_vol, prev_vol)
+
+    recent_vols = [h.get("volume_24h") for h in history[-3:] if h.get("volume_24h") is not None]
+    vol_avg_3 = avg(recent_vols)
+    vol_change_avg = pct_change(curr_vol, vol_avg_3)
+
+    score = 0
+    reasons = []
+
+    if vol_change_prev is not None:
+        if vol_change_prev <= -30:
+            score += 2
+            reasons.append("직전 대비 거래량 감소 강함")
+        elif vol_change_prev <= -10:
+            score += 1
+            reasons.append("직전 대비 거래량 소폭 감소")
+        else:
+            reasons.append("직전 대비 거래량 안정")
+
+    if vol_change_avg is not None:
+        if vol_change_avg <= -35:
+            score += 2
+            reasons.append("3회 평균 대비 거래량 하락")
+        elif vol_change_avg <= -15:
+            score += 1
+            reasons.append("3회 평균 대비 거래량 약화")
+        else:
+            reasons.append("3회 평균 대비 거래량 안정")
+
+    score = min(score, 3)
+    return score, " / ".join(reasons), vol_change_prev, vol_change_avg
+
+
+def score_sell_ratio_trend(curr_sell_ratio, history):
+    if len(history) < 2:
+        return 0, "매도 비율 연속 추세 데이터 부족"
+
+    prev1 = history[-1].get("sell_ratio")
+    prev2 = history[-2].get("sell_ratio")
+
+    if prev1 is None or prev2 is None:
+        return 0, "매도 비율 연속 추세 데이터 부족"
+
+    # 2회 연속 악화 여부
+    if curr_sell_ratio > prev1 > prev2:
+        return 2, "매도 비율 2회 연속 악화"
+    elif curr_sell_ratio > prev1:
+        return 1, "매도 비율 상승"
+    else:
+        return 0, "매도 비율 추세 안정"
 
 
 def classify(total_score):
-    if total_score <= 2:
+    if total_score <= 3:
         return "🟢 유지", "기존 보유자는 추세 관찰"
-    elif total_score <= 5:
+    elif total_score <= 7:
         return "🟡 주의", "부분 출금 또는 원금 회수 검토"
     else:
         return "🔴 위험", "신규 진입 보수적 접근, 출금 우선 검토"
 
 
-def build_report(pair, previous_state):
+def build_report(pair, history):
     base = pair.get("baseToken", {})
     quote = pair.get("quoteToken", {})
     chain_id = pair.get("chainId", "-")
     dex_id = pair.get("dexId", "-")
+
     price_usd = safe_float(pair.get("priceUsd"))
     liquidity_usd = safe_float((pair.get("liquidity") or {}).get("usd"))
     volume_24h = safe_float((pair.get("volume") or {}).get("h24"))
@@ -161,27 +247,23 @@ def build_report(pair, previous_state):
     txns_24h = (pair.get("txns") or {}).get("h24") or {}
     buys_24h = int(txns_24h.get("buys") or 0)
     sells_24h = int(txns_24h.get("sells") or 0)
+    sell_ratio = calc_sell_ratio(buys_24h, sells_24h)
 
-    prev_liquidity = previous_state.get("liquidity_usd") if previous_state else None
-    prev_volume = previous_state.get("volume_24h") if previous_state else None
+    s1, r1 = score_liquidity_size(liquidity_usd)
+    s2, r2 = score_volume_size(volume_24h)
+    s3, r3 = score_price_change(price_change_24h)
+    s4, r4 = score_sell_ratio(sell_ratio)
+    s5, r5, liq_change_prev, liq_change_avg = score_liquidity_trend(liquidity_usd, history)
+    s6, r6, vol_change_prev, vol_change_avg = score_volume_trend(volume_24h, history)
+    s7, r7 = score_sell_ratio_trend(sell_ratio, history)
 
-    liquidity_change_pct = pct_change(liquidity_usd, prev_liquidity)
-    volume_change_pct = pct_change(volume_24h, prev_volume)
-
-    s1, r1 = score_liquidity(liquidity_usd)
-    s2, r2 = score_liquidity_change(liquidity_change_pct)
-    s3, r3 = score_volume(volume_24h)
-    s4, r4 = score_volume_change(volume_change_pct)
-    s5, r5 = score_price_change(price_change_24h)
-    s6, sell_ratio, r6 = score_sell_ratio(buys_24h, sells_24h)
-
-    total_score = s1 + s2 + s3 + s4 + s5 + s6
+    total_score = s1 + s2 + s3 + s4 + s5 + s6 + s7
     status, action = classify(total_score)
 
     now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
 
-    lines = [
-        "📊 LGNS 업그레이드 자동 분석 리포트",
+    report_lines = [
+        "📊 LGNS 3회 평균 안정형 리포트",
         f"⏰ KST: {now_kst}",
         "",
         f"체인: {chain_id}",
@@ -189,9 +271,11 @@ def build_report(pair, previous_state):
         f"페어: {base.get('symbol', '?')}/{quote.get('symbol', '?')}",
         f"가격: ${price_usd:.6f}",
         f"유동성: {format_usd(liquidity_usd)}",
-        f"유동성 변화: {format_pct(liquidity_change_pct)}",
+        f"직전 대비 유동성 변화: {format_pct(liq_change_prev)}",
+        f"3회 평균 대비 유동성 변화: {format_pct(liq_change_avg)}",
         f"24시간 거래량: {format_usd(volume_24h)}",
-        f"거래량 변화: {format_pct(volume_change_pct)}",
+        f"직전 대비 거래량 변화: {format_pct(vol_change_prev)}",
+        f"3회 평균 대비 거래량 변화: {format_pct(vol_change_avg)}",
         f"24시간 가격변동: {price_change_24h:.2f}%",
         f"24시간 매수/매도: {buys_24h}/{sells_24h}",
         f"매도 비율: {sell_ratio * 100:.2f}%",
@@ -207,13 +291,17 @@ def build_report(pair, previous_state):
         f"- {r4} ({s4}점)",
         f"- {r5} ({s5}점)",
         f"- {r6} ({s6}점)",
+        f"- {r7} ({s7}점)",
     ]
 
-    return "\n".join(lines), {
+    new_entry = {
         "timestamp": now_kst,
         "liquidity_usd": liquidity_usd,
-        "volume_24h": volume_24h
+        "volume_24h": volume_24h,
+        "sell_ratio": sell_ratio,
     }
+
+    return "\n".join(report_lines), new_entry
 
 
 def send_telegram(message):
@@ -230,9 +318,14 @@ def send_telegram(message):
 def main():
     try:
         pair = fetch_pair()
-        previous_state = load_previous_state()
-        report, new_state = build_report(pair, previous_state)
-        save_state(new_state)
+        history = load_history()
+
+        report, new_entry = build_report(pair, history)
+
+        history.append(new_entry)
+        history = history[-20:]  # 최근 20개만 유지
+        save_history(history)
+
     except Exception as e:
         report = f"❌ LGNS 분석 실패\n오류: {e}"
 
