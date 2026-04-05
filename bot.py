@@ -6,6 +6,7 @@ from datetime import datetime, timezone, timedelta
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = os.environ["CHAT_ID"]
 
+# LGNS / DAI 대표 풀
 CHAIN_ID = "polygon"
 PAIR_ADDRESS = "0x882df4b0fb50a229c3b4124eb18c759911485bfb"
 
@@ -43,9 +44,7 @@ def load_history():
     try:
         with open(HISTORY_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            if isinstance(data, list):
-                return data
-            return []
+            return data if isinstance(data, list) else []
     except Exception:
         return []
 
@@ -237,20 +236,93 @@ def get_alert_message(price_change_24h, liq_change_ref, sell_ratio):
     if liq_change_ref is None:
         liq_change_ref = 0
 
+    # 복합 경고
     if price_change_24h <= -20 and liq_change_ref <= -5 and sell_ratio >= 0.80:
-        return "🚨🚨🚨 탈출 신호: 가격 급락 + 유동성 급감 + 매도 폭증", 4, "가격 -20% 이하 + 유동성 -5% 이하 + 매도비율 80% 이상"
+        return (
+            "🚨🚨🚨 LGNS VIP 탈출 신호",
+            4,
+            "가격 -20% 이하 + 유동성 -5% 이하 + 매도비율 80% 이상",
+        )
     elif price_change_24h <= -15 and liq_change_ref <= -3 and sell_ratio >= 0.75:
-        return "🔥 긴급 경고: 가격 급락 + 유동성 감소 + 매도 심화", 3, "가격 -15% 이하 + 유동성 -3% 이하 + 매도비율 75% 이상"
+        return (
+            "🔥 LGNS VIP 긴급 경고",
+            3,
+            "가격 -15% 이하 + 유동성 -3% 이하 + 매도비율 75% 이상",
+        )
     elif price_change_24h <= -10 and liq_change_ref <= -2 and sell_ratio >= 0.70:
-        return "⚠️ 경고: 가격 하락 + 유동성 약화 + 매도 증가", 2, "가격 -10% 이하 + 유동성 -2% 이하 + 매도비율 70% 이상"
+        return (
+            "⚠️ LGNS VIP 경고",
+            2,
+            "가격 -10% 이하 + 유동성 -2% 이하 + 매도비율 70% 이상",
+        )
+
+    # 가격 단독 경고
     elif price_change_24h <= -20:
-        return "🚨 가격 단독 탈출 신호: -20% 급락", 3, "가격 -20% 이하 단독 급락"
+        return "🚨 가격 단독 탈출 신호", 3, "가격 -20% 이하 단독 급락"
     elif price_change_24h <= -15:
-        return "🔥 가격 긴급 경고: -15% 급락", 2, "가격 -15% 이하 단독 급락"
+        return "🔥 가격 단독 긴급 경고", 2, "가격 -15% 이하 단독 급락"
     elif price_change_24h <= -10:
-        return "⚠️ 가격 경고: -10% 급락", 1, "가격 -10% 이하 단독 급락"
+        return "⚠️ 가격 단독 경고", 1, "가격 -10% 이하 단독 급락"
 
     return "", 0, ""
+
+
+def build_insights(price_change_24h, liq_change_ref, vol_change_prev, sell_ratio):
+    insights = []
+
+    if sell_ratio >= 0.80:
+        insights.append("• 매도 압력 매우 높음")
+    elif sell_ratio >= 0.70:
+        insights.append("• 매도 압력 높음")
+
+    if liq_change_ref is not None:
+        if liq_change_ref <= -5:
+            insights.append("• 유동성 급감 진행")
+        elif liq_change_ref <= -2:
+            insights.append("• 유동성 약화 진행")
+
+    if vol_change_prev is not None:
+        if vol_change_prev <= -35:
+            insights.append("• 거래량 급감 → 유입 약화")
+        elif vol_change_prev <= -15:
+            insights.append("• 거래량 감소 → 관망세 확대")
+
+    if price_change_24h <= -15:
+        insights.append("• 가격 급락 구간 진입")
+    elif price_change_24h <= -10:
+        insights.append("• 가격 하락 경고 구간")
+
+    if not insights:
+        insights.append("• 시장 안정 상태 유지")
+
+    return insights
+
+
+def build_action_guide(total_score):
+    if total_score >= 10:
+        return [
+            "✔ 즉시 출금 전략 우선 검토",
+            "✔ 신규 진입 금지",
+            "✔ 반등 기대보다 리스크 관리 우선",
+        ]
+    elif total_score >= 8:
+        return [
+            "✔ 보유분 축소 검토",
+            "✔ 신규 진입 금지",
+            "✔ 추가 하락 여부 즉시 점검",
+        ]
+    elif total_score >= 5:
+        return [
+            "✔ 부분 출금 검토",
+            "✔ 원금 회수 우선",
+            "✔ 추세 악화 여부 관찰",
+        ]
+    else:
+        return [
+            "✔ 추세 관찰 유지",
+            "✔ 추가 진입은 신중",
+            "✔ 다음 리포트까지 모니터링",
+        ]
 
 
 def build_report(pair, history):
@@ -278,60 +350,87 @@ def build_report(pair, history):
     s7, r7 = score_sell_ratio_trend(sell_ratio, history)
 
     liq_change_ref = liq_change_avg if liq_change_avg is not None else liq_change_prev
-    alert_msg, extra_score, extra_reason = get_alert_message(price_change_24h, liq_change_ref, sell_ratio)
+    alert_title, extra_score, extra_reason = get_alert_message(price_change_24h, liq_change_ref, sell_ratio)
 
     total_score = s1 + s2 + s3 + s4 + s5 + s6 + s7 + extra_score
     status, action = classify(total_score)
 
+    insights = build_insights(price_change_24h, liq_change_ref, vol_change_prev, sell_ratio)
+    guides = build_action_guide(total_score)
+
     now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S")
 
-    report_lines = [
-        "📊 LGNS 복합위험 감지 리포트",
-        f"⏰ KST: {now_kst}",
-        "",
-        f"체인: {chain_id}",
-        f"DEX: {dex_id}",
-        f"페어: {base.get('symbol', '?')}/{quote.get('symbol', '?')}",
-        f"가격: ${price_usd:.6f}",
-        f"유동성: {format_usd(liquidity_usd)}",
-        f"직전 대비 유동성 변화: {format_pct(liq_change_prev)}",
-        f"3회 평균 대비 유동성 변화: {format_pct(liq_change_avg)}",
-        f"24시간 거래량: {format_usd(volume_24h)}",
-        f"직전 대비 거래량 변화: {format_pct(vol_change_prev)}",
-        f"3회 평균 대비 거래량 변화: {format_pct(vol_change_avg)}",
-        f"24시간 가격변동: {price_change_24h:.2f}%",
-        f"24시간 매수/매도: {buys_24h}/{sells_24h}",
-        f"매도 비율: {sell_ratio * 100:.2f}%",
-        "",
-        f"신호: {status}",
-        f"점수: {total_score}",
-        f"판단: {action}",
-        "",
-        "근거:",
-        f"- {r1} ({s1}점)",
-        f"- {r2} ({s2}점)",
-        f"- {r3} ({s3}점)",
-        f"- {r4} ({s4}점)",
-        f"- {r5} ({s5}점)",
-        f"- {r6} ({s6}점)",
-        f"- {r7} ({s7}점)",
-    ]
+    lines = []
 
+    if alert_title:
+        lines.append(alert_title)
+        lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━")
+    lines.append("💎 LGNS VIP REPORT")
+    lines.append("━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"⏰ KST: {now_kst}")
+    lines.append(f"🌐 체인: {chain_id}")
+    lines.append(f"🏦 DEX: {dex_id}")
+    lines.append(f"🪙 페어: {base.get('symbol', '?')}/{quote.get('symbol', '?')}")
+    lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━")
+    lines.append("📊 MARKET STATUS")
+    lines.append("━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"💰 가격: ${price_usd:.6f}")
+    lines.append(f"📉 24H 변동: {price_change_24h:.2f}%")
+    lines.append(f"💧 유동성: {format_usd(liquidity_usd)}")
+    lines.append(f"↘ 직전 대비 유동성: {format_pct(liq_change_prev)}")
+    lines.append(f"↘ 3회 평균 대비 유동성: {format_pct(liq_change_avg)}")
+    lines.append(f"📊 24H 거래량: {format_usd(volume_24h)}")
+    lines.append(f"↘ 직전 대비 거래량: {format_pct(vol_change_prev)}")
+    lines.append(f"↘ 3회 평균 대비 거래량: {format_pct(vol_change_avg)}")
+    lines.append(f"⚖️ 매수/매도: {buys_24h}/{sells_24h}")
+    lines.append(f"🚪 매도 비율: {sell_ratio * 100:.2f}%")
+    lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━")
+    lines.append("🧠 AI SIGNAL")
+    lines.append("━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"➡ 상태: {status}")
+    lines.append(f"➡ 점수: {total_score}점")
+    lines.append(f"➡ 전략: {action}")
+    lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━")
+    lines.append("⚠️ 핵심 해석")
+    lines.append("━━━━━━━━━━━━━━━━━━━")
+    lines.extend(insights)
+    lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━")
+    lines.append("🎯 ACTION GUIDE")
+    lines.append("━━━━━━━━━━━━━━━━━━━")
+    lines.extend(guides)
+    lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━")
+    lines.append("📝 SCORE DETAIL")
+    lines.append("━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"• {r1} ({s1}점)")
+    lines.append(f"• {r2} ({s2}점)")
+    lines.append(f"• {r3} ({s3}점)")
+    lines.append(f"• {r4} ({s4}점)")
+    lines.append(f"• {r5} ({s5}점)")
+    lines.append(f"• {r6} ({s6}점)")
+    lines.append(f"• {r7} ({s7}점)")
     if extra_reason:
-        report_lines.append(f"- 복합 경고: {extra_reason} ({extra_score}점)")
-
-    if alert_msg:
-        report_lines.insert(0, "")
-        report_lines.insert(0, alert_msg)
+        lines.append(f"• 복합 경고: {extra_reason} ({extra_score}점)")
 
     new_entry = {
         "timestamp": now_kst,
         "liquidity_usd": liquidity_usd,
         "volume_24h": volume_24h,
-        "sell_ratio": sell_ratio
+        "sell_ratio": sell_ratio,
     }
 
-    return "\n".join(report_lines), new_entry
+    return "\n".join(lines), new_entry
 
 
 def send_telegram(message):
